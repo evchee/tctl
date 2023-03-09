@@ -5,6 +5,7 @@
 .vscode/*.log
 *.code-workspace
 .DS_Store
+.csv
 
 # Executables
 /tctl

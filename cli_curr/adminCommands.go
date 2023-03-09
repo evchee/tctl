@@ -26,11 +26,16 @@ package cli_curr
 
 import (
 	"context"
+	"encoding/csv"
 	"fmt"
+	"io"
 	"math"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/olivere/elastic/v7"
@@ -222,6 +227,70 @@ func AdminDeleteWorkflow(c *cli.Context) {
 	}
 
 	fmt.Println("Workflow execution deleted.")
+}
+
+func AdminBatchDeleteWorkflow(c *cli.Context) {
+
+	namespace := getRequiredGlobalOption(c, FlagNamespace)
+
+	fileName := c.String("workflowlist")
+	if fileName == "" {
+		fileName = "workflows.csv"
+	}
+	f, err := os.Open(fileName)
+	if err != nil {
+		panic(err)
+	}
+	r := csv.NewReader(f)
+	var i uint64
+
+	ch := make(chan []string, 4)
+	var wg sync.WaitGroup
+
+	for j := 0; j < 4; j++ {
+		go func() {
+			adminClient := cFactory.AdminClient(c)
+			wg.Add(1)
+			defer wg.Done()
+			for wf := range ch {
+				atomic.AddUint64(&i, 1)
+				resp, err := adminClient.DeleteWorkflowExecution(context.Background(), &adminservice.DeleteWorkflowExecutionRequest{
+					Namespace: namespace,
+					Execution: &commonpb.WorkflowExecution{
+						WorkflowId: strings.TrimSpace(wf[0]),
+						RunId:      strings.TrimSpace(wf[1]),
+					},
+				})
+				if err != nil {
+					fmt.Printf("failed to delete workflow wid: %s rid:%s\n", wf[0], wf[1])
+					fmt.Printf("err: %v\n", err)
+				} else {
+					warnStr := ""
+					if len(resp.Warnings) != 0 {
+						for _, warning := range resp.Warnings {
+							warnStr = warnStr + warning
+						}
+					}
+					fmt.Printf("%d deleted workflows | wid: %s rid:%s | warnings: %s\n", i, wf[0], wf[1], warnStr)
+				}
+			}
+		}()
+	}
+	startTime := time.Now()
+	for {
+		wf, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		ch <- wf
+
+	}
+	close(ch)
+	wg.Wait()
+	endTime := time.Now()
+	fmt.Printf("Execution took a total of %s", endTime.Sub(startTime).String())
+	fmt.Printf("Deleting wf/s %f", endTime.Sub(startTime).Seconds()/(float64(i)))
+
 }
 
 func adminDeleteVisibilityDocument(c *cli.Context, namespaceID string) {
