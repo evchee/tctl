@@ -142,8 +142,9 @@ func newAdminWorkflowCommands() []cli.Command {
 			Usage: "Delete current workflow execution and the mutableState record",
 			Flags: []cli.Flag{
 				cli.StringFlag{
-					Name:  "workflowlist",
-					Usage: "csv of workflow ids and run ids",
+					Name:     "input_csv",
+					Usage:    "csv of workflow ids and run ids",
+					Required: true,
 				},
 			},
 			Action: func(c *cli.Context) {

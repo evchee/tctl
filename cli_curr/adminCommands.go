@@ -229,67 +229,116 @@ func AdminDeleteWorkflow(c *cli.Context) {
 	fmt.Println("Workflow execution deleted.")
 }
 
+var failedToDeleteFileName = "workflow-failed-to-delete"
+var deletedWithWarningsFileName = "workflow-deleted-with-warn"
+
+const PARALLELISM = 10
+
 func AdminBatchDeleteWorkflow(c *cli.Context) {
-
-	namespace := getRequiredGlobalOption(c, FlagNamespace)
-
-	fileName := c.String("workflowlist")
-	if fileName == "" {
-		fileName = "workflows.csv"
-	}
-	f, err := os.Open(fileName)
+	startTime := time.Now()
+	f, err := os.Open(c.String("input_csv"))
 	if err != nil {
 		panic(err)
 	}
-	r := csv.NewReader(f)
-	var i uint64
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	ch := make(chan []string, 4)
+	failedToDeleteRow := make(chan []string)
+	deletedWithWarnRow := make(chan []string)
+	var i int64
+
+	var csvWG sync.WaitGroup
+	go func(ctx context.Context) {
+		csvWG.Add(1)
+		defer csvWG.Done()
+		failedToDeleteFile, err := os.OpenFile(failedToDeleteFileName+c.String("input_csv"), os.O_CREATE|os.O_WRONLY, os.ModePerm)
+		if err != nil {
+			panic(err)
+		}
+		defer failedToDeleteFile.Close()
+		w := csv.NewWriter(failedToDeleteFile)
+		for row := range failedToDeleteRow {
+			w.Write(row)
+			w.Flush()
+		}
+	}(ctx)
+
+	go func(ctx context.Context) {
+		csvWG.Add(1)
+		defer csvWG.Done()
+		deletedWithWarningsFile, err := os.OpenFile(deletedWithWarningsFileName+c.String("input_csv"), os.O_CREATE|os.O_WRONLY, os.ModePerm)
+		if err != nil {
+			panic(err)
+		}
+		defer deletedWithWarningsFile.Close()
+		w := csv.NewWriter(deletedWithWarningsFile)
+		for row := range deletedWithWarnRow {
+			w.Write(row)
+			w.Flush()
+		}
+	}(ctx)
+
+	corruptExecutions := make(chan []string)
 	var wg sync.WaitGroup
 
-	for j := 0; j < 4; j++ {
-		go func() {
-			adminClient := cFactory.AdminClient(c)
+	for j := 0; j < PARALLELISM; j++ {
+		adminClient := cFactory.AdminClient(c)
+		go func(ctx context.Context) {
 			wg.Add(1)
 			defer wg.Done()
-			for wf := range ch {
-				atomic.AddUint64(&i, 1)
+			for wf := range corruptExecutions {
+				atomic.AddInt64(&i, 1)
+				ns := strings.TrimSpace(wf[2])
+				if ns == "" {
+					ns = "default"
+				}
 				resp, err := adminClient.DeleteWorkflowExecution(context.Background(), &adminservice.DeleteWorkflowExecutionRequest{
-					Namespace: namespace,
+					Namespace: ns,
 					Execution: &commonpb.WorkflowExecution{
 						WorkflowId: strings.TrimSpace(wf[0]),
 						RunId:      strings.TrimSpace(wf[1]),
 					},
 				})
 				if err != nil {
-					fmt.Printf("failed to delete workflow wid: %s rid:%s\n", wf[0], wf[1])
-					fmt.Printf("err: %v\n", err)
+					failedToDeleteRow <- append(wf, err.Error())
+
 				} else {
-					warnStr := ""
 					if len(resp.Warnings) != 0 {
-						for _, warning := range resp.Warnings {
-							warnStr = warnStr + warning
-						}
+						deletedWithWarnRow <- append(wf, resp.GetWarnings()...)
 					}
-					fmt.Printf("%d deleted workflows | wid: %s rid:%s | warnings: %s\n", i, wf[0], wf[1], warnStr)
 				}
 			}
-		}()
+		}(ctx)
 	}
-	startTime := time.Now()
+
+	go func(ctx context.Context) {
+		wg.Wait()
+		close(failedToDeleteRow)
+		close(deletedWithWarnRow)
+	}(ctx)
+
+	go func(ctx context.Context) {
+		for {
+			time.Sleep(time.Second)
+			curTime := time.Now()
+			fmt.Printf("Elapsed time %s| %d wf | %fwf/s\n", curTime.Sub(startTime).String(), i, (float64(i))/curTime.Sub(startTime).Seconds())
+		}
+	}(ctx)
+
+	r := csv.NewReader(f)
 	for {
 		wf, err := r.Read()
 		if err == io.EOF {
 			break
 		}
-		ch <- wf
+		corruptExecutions <- wf
 
 	}
-	close(ch)
-	wg.Wait()
+	close(corruptExecutions)
+	csvWG.Wait()
 	endTime := time.Now()
-	fmt.Printf("Execution took a total of %s", endTime.Sub(startTime).String())
-	fmt.Printf("Deleting wf/s %f", endTime.Sub(startTime).Seconds()/(float64(i)))
+	fmt.Printf("Execution took a total of %s\n", endTime.Sub(startTime).String())
+	fmt.Printf("Deleting wf/s %f\n", endTime.Sub(startTime).Seconds()/(float64(i)))
 
 }
 
