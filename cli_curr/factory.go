@@ -67,6 +67,7 @@ type ClientFactory interface {
 	AdminClient(c *cli.Context) adminservice.AdminServiceClient
 	SDKClient(c *cli.Context, namespace string) sdkclient.Client
 	HealthClient(c *cli.Context) healthpb.HealthClient
+	CreateGRPCConnection(c *cli.Context) (*grpc.ClientConn, error)
 }
 
 type clientFactory struct {
@@ -84,14 +85,14 @@ func NewClientFactory() ClientFactory {
 
 // FrontendClient builds a frontend client
 func (b *clientFactory) FrontendClient(c *cli.Context) workflowservice.WorkflowServiceClient {
-	connection, _ := b.createGRPCConnection(c)
+	connection, _ := b.CreateGRPCConnection(c)
 
 	return workflowservice.NewWorkflowServiceClient(connection)
 }
 
 // AdminClient builds an admin client.
 func (b *clientFactory) AdminClient(c *cli.Context) adminservice.AdminServiceClient {
-	connection, _ := b.createGRPCConnection(c)
+	connection, _ := b.CreateGRPCConnection(c)
 
 	return adminservice.NewAdminServiceClient(connection)
 }
@@ -127,7 +128,7 @@ func (b *clientFactory) SDKClient(c *cli.Context, namespace string) sdkclient.Cl
 
 // HealthClient builds a health client.
 func (b *clientFactory) HealthClient(c *cli.Context) healthpb.HealthClient {
-	connection, _ := b.createGRPCConnection(c)
+	connection, _ := b.CreateGRPCConnection(c)
 
 	return healthpb.NewHealthClient(connection)
 }
@@ -145,7 +146,7 @@ func headersProviderInterceptor(headersProvider plugin.HeadersProvider) grpc.Una
 	}
 }
 
-func (b *clientFactory) createGRPCConnection(c *cli.Context) (*grpc.ClientConn, error) {
+func (b *clientFactory) CreateGRPCConnection(c *cli.Context) (*grpc.ClientConn, error) {
 	hostPort := c.GlobalString(FlagAddress)
 	if hostPort == "" {
 		hostPort = localHostPort
