@@ -230,6 +230,7 @@ func AdminDeleteWorkflow(c *cli.Context) {
 
 var failedToDeleteFileName = "workflow-failed-to-delete"
 var deletedWithWarningsFileName = "workflow-deleted-with-warn"
+var deleteSuccessfulFileName = "workflow-deleted-success"
 
 const PARALLELISM = 10
 
@@ -245,7 +246,11 @@ func AdminBatchDeleteWorkflow(c *cli.Context) {
 
 	failedToDeleteRow := make(chan []string, PARALLELISM)
 	deletedWithWarnRow := make(chan []string, PARALLELISM)
-	var i int64
+	deletedOkRow := make(chan []string, PARALLELISM)
+	var wfsProcessed int64
+	var wfsDeleted int64
+	var wfsDeletedWithWarn int64
+	var wfsDeleteFailed int64
 
 	var csvWG sync.WaitGroup
 	go func(ctx context.Context) {
@@ -260,6 +265,23 @@ func AdminBatchDeleteWorkflow(c *cli.Context) {
 		for row := range failedToDeleteRow {
 			w.Write(row)
 			w.Flush()
+			atomic.AddInt64(&wfsDeleteFailed, 1)
+		}
+	}(ctx)
+
+	go func(ctx context.Context) {
+		csvWG.Add(1)
+		defer csvWG.Done()
+		deleteSuccessfulFile, err := os.OpenFile(deleteSuccessfulFileName+c.String("input_csv"), os.O_CREATE|os.O_WRONLY, os.ModePerm)
+		if err != nil {
+			panic(err)
+		}
+		defer deleteSuccessfulFile.Close()
+		w := csv.NewWriter(deleteSuccessfulFile)
+		for row := range deletedOkRow {
+			w.Write(row)
+			w.Flush()
+			atomic.AddInt64(&wfsDeleted, 1)
 		}
 	}(ctx)
 
@@ -275,6 +297,8 @@ func AdminBatchDeleteWorkflow(c *cli.Context) {
 		for row := range deletedWithWarnRow {
 			w.Write(row)
 			w.Flush()
+			atomic.AddInt64(&wfsDeletedWithWarn, 1)
+
 		}
 	}(ctx)
 	// adminClient := cFactory.AdminClient(c)
@@ -291,7 +315,6 @@ func AdminBatchDeleteWorkflow(c *cli.Context) {
 				defer wg.Done()
 				for wf := range corruptExecutions {
 					// adminClient := adminservice.NewAdminServiceClient(connection)
-					atomic.AddInt64(&i, 1)
 					ns := strings.TrimSpace(wf[2])
 					if ns == "" {
 						ns = "default"
@@ -311,6 +334,7 @@ func AdminBatchDeleteWorkflow(c *cli.Context) {
 							deletedWithWarnRow <- append(wf, resp.GetWarnings()...)
 						}
 					}
+					atomic.AddInt64(&wfsProcessed, 1)
 				}
 			}(ctx)
 		}
@@ -320,13 +344,14 @@ func AdminBatchDeleteWorkflow(c *cli.Context) {
 		wg.Wait()
 		close(failedToDeleteRow)
 		close(deletedWithWarnRow)
+		close(deletedOkRow)
 	}(ctx)
 
 	go func(ctx context.Context) {
 		for {
 			time.Sleep(time.Second)
 			curTime := time.Now()
-			fmt.Printf("%s | Elapsed time %s| %d wf | %fwf/s\n", fileName, curTime.Sub(startTime).String(), i, (float64(i))/curTime.Sub(startTime).Seconds())
+			fmt.Printf("%s | Elapsed time %s| %d wf processed | %fwf/s | success %d | warn %d | failed %d\n", fileName, curTime.Sub(startTime).String(), wfsProcessed, (float64(wfsProcessed))/curTime.Sub(startTime).Seconds(), wfsDeleted, wfsDeletedWithWarn, wfsDeleteFailed)
 		}
 	}(ctx)
 
@@ -353,7 +378,7 @@ func AdminBatchDeleteWorkflow(c *cli.Context) {
 	close(corruptExecutions)
 	csvWG.Wait()
 	endTime := time.Now()
-	fmt.Printf("%s | Execution took a total of%s| %d wf | %f wf/s\n", fileName, endTime.Sub(startTime).String(), i, (float64(i))/endTime.Sub(startTime).Seconds())
+	fmt.Printf("%s | Execution took a total of%s| %d wf | %f wf/s | success %d | warn %d | failed %d\n", fileName, endTime.Sub(startTime).String(), wfsProcessed, (float64(wfsProcessed))/endTime.Sub(startTime).Seconds(), wfsDeleted, wfsDeletedWithWarn, wfsDeleteFailed)
 }
 
 func adminDeleteVisibilityDocument(c *cli.Context, namespaceID string) {
